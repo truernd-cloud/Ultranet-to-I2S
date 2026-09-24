@@ -1,6 +1,8 @@
 # Ultranet-to-I2S
 Use RPi Pico to decode Behringer Ultranet and output to multiple I2S streams
 
+[한국어 README](README.ko.md) · [코드 리뷰 (한국어)](CODE_REVIEW.ko.md)
+
 I've wanted a simple (and cheap!) way to decode analog audio from Behringer Ultranet for years, and I've finally got around to doing it! The Raspberry Pi Pico is the ideal device to use, as it has two secret weapons: the PIO modules, and dual processors. I use the PIO modules to decode an incoming Ultranet stream into 8 audio channels, then to encode pairs of channels into I2S output streams (to send to low-cost I2S decoder boards as found on popular auction sites). 
 
 Dual Processors provide a very simple way to resolve the synchronisation issue between the incoming Ultranet stream (which is clocked from the source device) and the outgoing I2S streams, which are clocked from this device. The two clocks can be made similar, but not identical. Using one processor to read the Ultranet audio values into an array, then another processor to output them to I2S means that each thread can run independently, thus eliminating the clicks and noise associated with out-of-sync digital audio.

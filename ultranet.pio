@@ -1,7 +1,7 @@
 ; receives Ultranet protocol - 8 channels encoded in AES/EBU like protocol
-; each sample at 48khz sample rate. 
+; each sample at 48khz sample rate.
 ; assumes core clock frequency overclocked to 172MHz to better capture
-; line state changes. 
+; line state changes.
 ; line bit rate is 12.288MHz (same as 192khz stereo AES/EBU encodinig)
 ; biphase encoding means line clock rate is 12.288 x 2 = 24.576 MHz
 ;
@@ -13,22 +13,43 @@
 ; Biphase bitstream is designed to be unpolarised, but Ultranet always
 ; starts sync sequence with rising edge (as preceeding parity bit restores polarity)
 ;
+; [한국어]
+; Ultranet 프로토콜 수신기 - AES/EBU 와 비슷한 방식으로 인코딩된 8채널을 받는다.
+; 각 채널의 샘플레이트는 48kHz.
+; 선로 상태 변화를 정밀하게 잡기 위해 코어 클럭을 오버클럭한다고 가정한다
+; (현재 기본값은 196.5MHz / cy=8, 172MHz / cy=7 도 가능 - ultranet.h 의 CLOCKSPEED 와 맞출 것).
+; 선로 비트 레이트는 12.288MHz (192kHz 스테레오 AES/EBU 와 같음).
+; 바이페이즈 인코딩이므로 선로 클럭은 12.288 x 2 = 24.576MHz.
+;
+; 입력 핀은 메인 프로그램에서 지정하므로 여기서는 pin 0 으로만 참조한다.
+;
+; 32비트 서브프레임 하나를 디코딩할 때마다 RX FIFO 로 넘기며, 동기 패턴은 LSB 쪽에 위치한다.
+; 32비트 워드의 하위 6비트를 마스크해 0x0B 또는 0x0F 와 비교하면 프레임 시작을 검출할 수 있다.
+;
+; 바이페이즈 비트스트림은 원래 극성이 없도록 설계되었지만, Ultranet 은 동기 시퀀스를 항상
+; 상승 에지로 시작한다 (직전의 패리티 비트가 극성을 원래대로 되돌리기 때문).
+;
 
-.pio_version 0              ; specify RP2040 instruction set
+.pio_version 0              ; specify RP2040 instruction set       (RP2040 명령어 세트 사용)
 
 .program ultranet
 
 .define cy 8                ; cycle delay: 24.576 * 8 = 196.608MHz - run cpu clock at 196.5MHz
+                            ; (심볼 하나당 PIO 사이클 수. 196.5MHz 에서 8)
 ; .define cy 7                ; cycle delay: 24.576 * 7 = 172.032MHz - run cpu clock at 172MHz
 .define mp 4                ; sample mid-point of incoming pulses (half cycle delay)
+                            ; (펄스 중앙에서 샘플링하기 위한 반 심볼 지연)
 
 ; X register is used as a source of "1"s for shifting into ISR
 ;    (only LSB 2 bits are used to generate 0b1 or 0b11 to emit into input data word)
+; X 레지스터는 ISR 에 "1" 을 넣기 위한 소스로 쓴다
+;    (하위 2비트만 사용해 0b1 또는 0b11 을 입력 워드에 넣는다)
 
 public entry_point:
-    set x 0x1F              ; set lower 5 bits of x register to "1" (0x0000001F)
-    wait 0 pin 0            ; polarity bit always preceeds preamble - wait for low level
+    set x 0x1F              ; set lower 5 bits of x register to "1" (0x0000001F)   (x 하위 5비트를 1 로)
+    wait 0 pin 0            ; polarity bit always preceeds preamble - wait for low level   (프리앰블 앞의 극성 비트 = LOW 를 기다림)
 
+; 각 줄 오른쪽 열: 심볼 시작/끝 위치, (*) 는 지연 후 핀 값을 래치하는 지점
 ;                           ; comment                       :  start sym pos   end sym pos
 ;                                                             (*) symbol latch with delay
 .wrap_target
@@ -54,14 +75,17 @@ symbol_01:
     in x, 1                ; emit 1                        :  1 + (mp+1)/cy    1 + (mp+2)/cy
     jmp wait0              ; go wait0                      :  1 + (mp+2)/cy    1 + (mp+3)/cy
 
+; 같은 레벨이 3심볼 연속(111)되는 것은 바이페이즈 데이터에서는 나올 수 없으므로 동기(프리앰블)로 판단한다.
+; 이 시점에 지금까지 모은 ISR(이전 서브프레임)을 FIFO 로 밀어 넣는다.
 sync111x:
     push noblock           ; load 32bit value from ISR to FIFO - don't block but set flag on overrun
+                           ; (ISR 을 FIFO 로 전송 - FIFO 가 가득 차도 멈추지 않고 오버런 플래그만 설정)
     in x, 2                ; emit sync (sync 1110)         :  2 + (mp+1)/cy    2 + (mp+2)/cy
     wait 0 pin 0 [cy-1+mp] ; wait for 1 -> 0               :  3                4 + mp/cy
     jmp pin sync1xxx [cy-2]; If sync 1xxx -> go sync1xxx   :  4 + mp/cy (*)    5 + (mp-1)/cy
     jmp symbol_0x          ; else go symbol_0x (sync 0xxx) :  5 + (mp-1)/cy    5 + mp/cy (= 1 + mp/cy)
 
-sync1xxx:                  ; sync1xxx must be sync1000
+sync1xxx:                  ; sync1xxx must be sync1000     (sync1xxx 는 반드시 sync1000 이다)
     in x, 2                ; emit sync (sync 1000)         :  2 + (mp-1)/cy    2 + mp/cy
     jmp entry_point        ;                               :  2 + mp/cy        2 + (mp+1)/cy
 
@@ -70,13 +94,19 @@ sync1xxx:                  ; sync1xxx must be sync1000
 ; Outputs I2S MCLK on specified pin
 ; Frequency is 256xfs - ideal would be 256 x 48MHz = 12.288MHz
 ; Actual frequency = 172MHz (sys clock) / 7 / 2 = 12.286MHz
-; only one MCLK clock generator for all 4 I2S state machines 
+; only one MCLK clock generator for all 4 I2S state machines
 ; as they should all be in sync. with the (much faster) master clock
+;
+; [한국어] 마스터 클럭 출력
+; 지정한 핀으로 I2S MCLK 를 출력한다.
+; 주파수는 256 x fs, 이상적으로는 256 x 48kHz = 12.288MHz.
+; 실제 주파수 = 196.5MHz / 8 / 2 ≒ 12.28MHz (172MHz 설정 시 172MHz / 7 / 2 ≒ 12.286MHz).
+; 4개의 I2S 상태 머신이 모두 같은 분주비를 쓰므로 MCLK 생성기는 하나만 둔다.
 
 .program mclk
 .wrap_target
-    set pins 1 [0]
-    set pins 0 [0]
+    set pins 1 [0]          ; (핀 HIGH)
+    set pins 0 [0]          ; (핀 LOW)
 .wrap
 
 ; I2S send Master
@@ -88,30 +118,41 @@ sync1xxx:                  ; sync1xxx must be sync1000
 ;
 ; The program generates 3 outputs on 3 separate pins (per state machine)
 ; One pin is driven by the "out" instruction (the SD line), while the other
-; two signal lines (LRCK and BCLK) are driven by "side set" functions  
+; two signal lines (LRCK and BCLK) are driven by "side set" functions
 ; Out pin = SD, side pin base = BCLK, pin base +1 = LRCLK
-; 
+;
+; [한국어] I2S 송신(마스터)
+; fs: 48kHz, 비트 깊이: 32비트 (슬롯 2개 x 32비트 = 64 BCLK / 프레임)
+; PIO 클럭: 24.56MHz (196.5MHz / 8) 또는 24.57MHz (172MHz / 7)
+; 비트 하나에 PIO 8사이클 → BCLK ≒ 3.07MHz = 64 x 48kHz
+; 같은 코드를 PIO 안의 상태 머신 4개가 공유한다.
+;
+; 상태 머신마다 핀 3개를 출력한다.
+; "out" 명령은 데이터(SD) 핀을 구동하고, 나머지 두 신호(BCLK, LRCLK)는 사이드셋으로 구동한다.
+; out 핀 = SD, 사이드셋 기준 핀 = BCLK, 사이드셋 기준 핀 +1 = LRCLK
+; I2S 규격대로 데이터의 MSB 는 LRCLK 가 바뀐 뒤 BCLK 한 주기 늦게 출력된다.
+;
 
 .program i2s
 .side_set 2
-.define dly 3                           ; each cycle = 4 x data rate
+.define dly 3                           ; each cycle = 4 x data rate   (명령당 4사이클 → out + jmp = 비트당 8사이클)
 
             ;                   |----LRCLK
-            ;                    |---BCLK    
-public entry_point:                     ; start here on reset
-.wrap_target    
-    set y 30 [dly-1]     side 0b01      ; shift out counter
-    pull block           side 0b01      ; get next word from fifo
+            ;                    |---BCLK
+public entry_point:                     ; start here on reset          (리셋 시 여기서 시작)
+.wrap_target
+    set y 30 [dly-1]     side 0b01      ; shift out counter            (비트 카운터 = 31비트 반복)
+    pull block           side 0b01      ; get next word from fifo      (FIFO 에서 다음 워드(왼쪽) 가져오기)
 loopL:
     out pins 1 [dly]     side 0b00      ; MSB
     jmp y-- loopL [dly]  side 0b01      ; MSB-1 -> LSB+1
-    out pins 1 [dly]     side 0b10      ; LSB
+    out pins 1 [dly]     side 0b10      ; LSB                          (LSB 출력과 동시에 LRCLK 전환 → 오른쪽)
     set y 30 [dly-1]     side 0b11      ; shift out counter
-    pull block           side 0b11      ; get next word from fifo
+    pull block           side 0b11      ; get next word from fifo      (FIFO 에서 다음 워드(오른쪽) 가져오기)
 loopR:
     out pins 1 [dly]     side 0b10      ; MSB
     jmp y-- loopR [dly]  side 0b11      ; MSB-1 -> LSB+1
-    out pins 1 [dly]     side 0b00      ; LSB
+    out pins 1 [dly]     side 0b00      ; LSB                          (LSB 출력과 동시에 LRCLK 전환 → 왼쪽)
 .wrap
 
 
@@ -120,11 +161,17 @@ loopR:
 
 ; Output driver for WS2812 type multi-colour daisy-chained LEDs.
 ; The minature Chinese RP2040 pico boards have one such LED, on pin 16,
-; which we use for status indications. 
+; which we use for status indications.
 ; The following constants work for most WS2812, WS2812B, and SK6812 LEDs,
 ; which use an 800KHz clock. To calculate state machine clock divider:
 ; SM cycles per output bit = T1 + T2 + T3
 ; SM clock = (800000 * <cycles per output bit>)
+;
+; [한국어] WS2812 계열 데이지체인 컬러 LED 출력 드라이버.
+; 소형 중국산 RP2040 보드는 GP16 에 이런 LED 가 하나 있어 상태 표시용으로 사용한다.
+; 아래 상수는 800kHz 클럭을 쓰는 대부분의 WS2812, WS2812B, SK6812 에서 동작한다.
+; 상태 머신 클럭 분주비 계산: 비트당 SM 사이클 = T1 + T2 + T3,
+; SM 클럭 = 800000 x (비트당 사이클 수)
 
 .define public T1 3
 .define public T2 3
@@ -132,10 +179,10 @@ loopR:
 
 .wrap_target
 bitloop:
-    out x, 1       side 0 [T3-1] ; Side-set still takes place when instruction stalls
-    jmp !x do_zero side 1 [T1-1] ; Branch on the bit we shifted out. Positive pulse
+    out x, 1       side 0 [T3-1] ; Side-set still takes place when instruction stalls   (명령이 대기 중이어도 사이드셋은 적용됨)
+    jmp !x do_zero side 1 [T1-1] ; Branch on the bit we shifted out. Positive pulse     (꺼낸 비트로 분기, HIGH 펄스 시작)
 do_one:
-    jmp  bitloop   side 1 [T2-1] ; Continue driving high, for a long pulse
+    jmp  bitloop   side 1 [T2-1] ; Continue driving high, for a long pulse              (비트 1: HIGH 를 길게 유지)
 do_zero:
-    nop            side 0 [T2-1] ; Or drive low, for a short pulse
+    nop            side 0 [T2-1] ; Or drive low, for a short pulse                      (비트 0: 일찍 LOW 로 → 짧은 펄스)
 .wrap

@@ -20,7 +20,7 @@
 *
 * Use PICO LED to indicate if we have a framing error
 * ie we get out of sync with the 8 subframes of the ultranet stream
-* if we don't detect start of frame sync in the right place, 
+* if we don't detect start of frame sync in the right place,
 * toggle the LED - so frequency of frame errors can be seen
 *
 * Use multicore to compensate for difference in speed between
@@ -28,12 +28,36 @@
 * stream (clocked from this pico). Array of samples is filled
 * from the Ulranet stream by core0, then read out to I2S using
 * core1, asynchronously from core0.
+*
+* [한국어]
+* Behringer Ultranet 디코더
+* Ultranet 스트림을 읽어 오디오 8채널을 디코딩하고,
+* 채널 두 개씩 묶어 I2S 스테레오 스트림으로 출력한다.
+*
+* Ultranet 비트 레이트 = 12.288MHz (32비트 샘플 8개 x 48kHz)
+* Ultranet 바이페이즈 클럭 = 2 x 12.288MHz = 24.576MHz
+* PIO 가 입력 클럭의 7배로 샘플링하려면 이상적인 시스템 클럭은 7 x 24.576 = 172.032MHz.
+* 실제로는 설정 가능한 값 중 가장 가까운 172000kHz 를 사용한다.
+*
+* 또는 입력 클럭의 8배로 샘플링하려면 이상적인 시스템 클럭은 8 x 24.576 = 196.608MHz.
+* 설정 가능한 값 중 가장 가까운 196500kHz 를 사용한다. (현재 기본값)
+*
+* Ultranet 오디오 샘플은 실제로 24비트가 아니라 22비트이므로,
+* 스트림에서 읽은 워드의 하위 비트를 마스크한다.
+*
+* LED 로 프레임 오류(8개 서브프레임과의 동기가 어긋남)를 표시한다.
+* 프레임 시작 동기 패턴이 예상 위치에서 검출되지 않으면 오류 LED 를 켠다.
+*
+* 멀티코어를 이용해 Ultranet 입력(송신 장비 클럭 기준)과 I2S 출력(이 Pico 클럭 기준)의
+* 속도 차이를 흡수한다. 코어0 은 Ultranet 스트림에서 샘플 배열을 채우고,
+* 코어1 은 코어0 과 비동기로 그 배열을 읽어 I2S 로 내보낸다.
 */
 
 #include "ultranet.h"
 
-volatile uint32_t samples[8];   // array of samples read from Ultranet stream
+volatile uint32_t samples[8];   // array of samples read from Ultranet stream   (Ultranet 에서 읽은 샘플 배열, 코어1 과 공유)
 
+// 셀렉터 스위치 입력 핀과 (선택 시) Pico 기본 LED 핀을 초기화한다
 void ultranet_gpio_init(void)
 {
     int count;
@@ -42,52 +66,60 @@ void ultranet_gpio_init(void)
         gpio_init(count);
 #ifdef SW_COMM_LOW                                          // switch common can be 0v or +3.3v
         gpio_pull_up(count);                                // for switch common to +3.3v
+                                                            // (공통 단자가 0V 이므로 풀업: 스위치 ON = LOW)
 #else
         gpio_pull_down(count);                              // for switch common to +3.3v
+                                                            // (공통 단자가 3.3V 이므로 풀다운: 스위치 ON = HIGH)
 #endif // SW_COMM_LOW
     }
 #ifdef PICO_LED
-    gpio_init(PICO_LED);                                    // set LED pin as GPIO 
-    gpio_set_dir(PICO_LED, GPIO_OUT);                       // set LED pin as output
+    gpio_init(PICO_LED);                                    // set LED pin as GPIO      (LED 핀을 GPIO 로 설정)
+    gpio_set_dir(PICO_LED, GPIO_OUT);                       // set LED pin as output    (LED 핀을 출력으로 설정)
 #endif // PICO_LED
 }
 
 // state machine init functions (used to be defined in <prog>.pio file)
+// 상태 머신 초기화 함수 (예전에는 <prog>.pio 파일 안에 정의되어 있었음)
+// Ultranet 입력용 PIO 상태 머신을 설정하고 시작한다
 void ultranet_pio_init(PIO pio, uint sm, uint pin)
 {
-    gpio_set_dir(pin, false);                               // set ultranet pin as input
-    gpio_set_pulls(pin, true, false);                       // set pullup on ultranet pin
-    uint offset = pio_add_program(pio, &ultranet_program);  // load code into pio mem
-    pio_sm_config c = ultranet_program_get_default_config(offset);  // get default structure
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);          // configure 8 depth input fifo
-    sm_config_set_in_pins (&c, pin);                        // input pin range base
-    pio_sm_init(pio, sm, offset, &c);                       // apply structure to state machine
-    pio_sm_set_jmp_pin(pio, UNET_SM, pin);                  // specify pin for jmp instructions
-    pio_sm_set_enabled(pio, sm, true);                      // start state machine running
+    gpio_set_dir(pin, false);                               // set ultranet pin as input            (입력으로 설정)
+    gpio_set_pulls(pin, true, false);                       // set pullup on ultranet pin           (풀업 설정)
+    uint offset = pio_add_program(pio, &ultranet_program);  // load code into pio mem               (PIO 메모리에 프로그램 적재)
+    pio_sm_config c = ultranet_program_get_default_config(offset);  // get default structure        (기본 설정 구조체)
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);          // configure 8 depth input fifo         (RX FIFO 를 8단으로 결합)
+    sm_config_set_in_pins (&c, pin);                        // input pin range base                 (입력 핀 기준)
+    pio_sm_init(pio, sm, offset, &c);                       // apply structure to state machine     (상태 머신에 설정 적용)
+    // 참고: 인자로 받은 sm 대신 UNET_SM 을 사용하고 있다 (현재는 값이 같아 문제 없음)
+    pio_sm_set_jmp_pin(pio, UNET_SM, pin);                  // specify pin for jmp instructions     (jmp pin 명령이 볼 핀 지정)
+    pio_sm_set_enabled(pio, sm, true);                      // start state machine running          (상태 머신 시작)
 }
 
 
 #ifdef WS2812
-volatile uint32_t led_state;                                // current value last sent to WS2812 LED
+volatile uint32_t led_state;                                // current value last sent to WS2812 LED   (WS2812 에 마지막으로 보낸 값)
+// WS2812 LED 구동용 PIO 상태 머신을 설정한다
 void ws2812_pio_init(PIO pio, uint sm, uint pin)            // Set up PIO SM for ws2812 LED module
 {
-    uint offset = pio_add_program(pio, &ws2812_program);    // PIO program shares code space with UNET and MCLK
-    pio_gpio_init(pio, pin);                                // Set up GPIO pin for PIO...
-    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);  // ...output
+    uint offset = pio_add_program(pio, &ws2812_program);    // PIO program shares code space with UNET and MCLK   (UNET/MCLK 과 코드 공간 공유)
+    pio_gpio_init(pio, pin);                                // Set up GPIO pin for PIO...                          (핀을 PIO 에 연결...)
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);  // ...output                                           (...출력으로)
 
     pio_sm_config c = ws2812_program_get_default_config(offset);
     sm_config_set_sideset_pins(&c, pin);
+    // 실제 인자는 shift_right=false(왼쪽 시프트, MSB 먼저), autopull=true, 24비트 단위이다 (아래 영문 주석은 부정확)
     sm_config_set_out_shift(&c, false, true, 24);           // set shift direction RIGHT, no autopull
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);          // use 8 deep TX FIFO
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);          // use 8 deep TX FIFO                                  (TX FIFO 8단)
 
-#define CYCLES_PER_BIT ((ws2812_T1)+(ws2812_T2)+(ws2812_T3)) // constants defined in .pio source file
+#define CYCLES_PER_BIT ((ws2812_T1)+(ws2812_T2)+(ws2812_T3)) // constants defined in .pio source file   (.pio 파일에 정의된 상수)
+    // WS2812 는 정확한 800kHz 비트 타이밍이 필요하므로 현재 시스템 클럭 기준으로 분주비를 계산한다
     float div = clock_get_hz(clk_sys) / (800000 * CYCLES_PER_BIT);  // ws2812 needs precise 800KHz timing
     sm_config_set_clkdiv(&c, div);
 
     pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);                      // Set ws2812 PIO state machine running
-    led_state = BLACK;                                      // initialise WS2812 LED to all off
-    pio_sm_put(pio, sm, led_state);                         // Clear all LED colours to off
+    pio_sm_set_enabled(pio, sm, true);                      // Set ws2812 PIO state machine running    (상태 머신 시작)
+    led_state = BLACK;                                      // initialise WS2812 LED to all off        (LED 상태를 꺼짐으로 초기화)
+    pio_sm_put(pio, sm, led_state);                         // Clear all LED colours to off            (LED 끄기)
 }
 #endif // WS2812
 
@@ -95,27 +127,35 @@ void ws2812_pio_init(PIO pio, uint sm, uint pin)            // Set up PIO SM for
 * Timer callback for periodically turning off Ultranet detected LED
 *  Outputs current state (as turned on by Ultranet stream code) then clears flag
 * If no Ultranet stream received, LED will turn off at next alarm tick
+*
+* [한국어]
+* Ultranet 수신 표시 LED 를 주기적으로 끄기 위한 타이머 콜백.
+* 현재 상태(Ultranet 디코딩 코드가 켠 값)를 LED 로 출력한 뒤 스트림 표시 비트를 지운다.
+* 다음 주기까지 Ultranet 스트림이 들어오지 않으면 다음 알람에서 LED 가 꺼진다.
+* 오류 표시(빨강) 비트는 지우지 않으므로 한 번 켜지면 재부팅 전까지 유지된다.
 */
 int64_t alarm_callback(alarm_id_t id, __unused void *repeatptr)
 {
 #ifdef WS2812
-    put_pixel(led_state);                                   // Output current sate of led_state flag to LED
+    put_pixel(led_state);                                   // Output current sate of led_state flag to LED   (현재 led_state 를 LED 로 출력)
 #endif // WS2812
 #ifdef PICO_LED
-    if((led_state & ~LED_STREAM_MASK) > 0)                  // led_state has been set by Ultranet stream code
-        gpio_put(PICO_LED, 1);                              // turn on LED when stream is detected
+    if((led_state & ~LED_STREAM_MASK) > 0)                  // led_state has been set by Ultranet stream code (스트림 코드가 비트를 켰으면)
+        gpio_put(PICO_LED, 1);                              // turn on LED when stream is detected            (스트림 검출 시 LED 켜기)
     else
-        gpio_put(PICO_LED, 0);                              // or turn off if no stream detected
+        gpio_put(PICO_LED, 0);                              // or turn off if no stream detected              (아니면 끄기)
 #endif // PICO_LED
-    led_state = led_state & LED_STREAM_MASK;                // Zero out the stream LED colour bits
+    led_state = led_state & LED_STREAM_MASK;                // Zero out the stream LED colour bits            (스트림 표시 색 비트만 0 으로)
+    // 반환값(양수)은 다음 알람까지의 시간(us). main() 의 repeat_us 를 가리키는 포인터에서 읽는다
     return *(const uint32_t*)repeatptr;                     // return value is repeat time
 }
 
 // Embedded binary information (for picotool interrogation of programmed device)
+// picotool 로 장치를 조회할 때 보이는 바이너리 정보(설명, 버전, 사용 핀)를 등록한다
 void set_binary_info(void)
 {
-    bi_decl(bi_program_description(DESCRIPTION));           // Description field for embedded identification 
-    bi_decl(bi_program_version_string(VERSION));            // Version field for embedded identification
+    bi_decl(bi_program_description(DESCRIPTION));           // Description field for embedded identification   (설명)
+    bi_decl(bi_program_version_string(VERSION));            // Version field for embedded identification       (버전)
 #ifdef UNETH_PIN
     bi_decl(bi_2pins_with_names(UNETL_PIN, "Ultranet Low (1-8) Stream Input", UNETH_PIN, "Ultranet High (9-16) Input"));
 #else
@@ -130,60 +170,67 @@ void set_binary_info(void)
 #ifdef PICO_LED
     bi_decl(bi_1pin_with_name(PICO_LED, "PICO board normal LED"));
 #endif // PICO_LED
-    set_core1_info();                                       // info for pins used by core1
+    set_core1_info();                                       // info for pins used by core1   (코어1 이 사용하는 핀 정보)
 }
 
 
 // read selector switch and return uint with switch positions in the 3 LSBs
+// 셀렉터 스위치를 읽어 하위 3비트에 스위치 상태를 담아 반환한다 (스위치 ON = 1)
+//   bit2    : Ultranet 입력 스트림 선택 (0 = 1-8, 1 = 9-16)
+//   bit1..0 : 출력 채널 쌍 오프셋 (0~3)
 uint get_selector(void)
 {
-    static uint sw_mask = 0b111 << SELECTOR_SW_BASE;        // Mask for selecting only switch bits from all GPIOs
+    static uint sw_mask = 0b111 << SELECTOR_SW_BASE;        // Mask for selecting only switch bits from all GPIOs   (전체 GPIO 중 스위치 비트만 고르는 마스크)
 
-#ifdef SW_COMM_LOW                                          // sw pulls gpio pins low, so invert sw result
+#ifdef SW_COMM_LOW                                          // sw pulls gpio pins low, so invert sw result          (스위치가 LOW 로 당기므로 결과 반전)
     return ((~gpio_get_all()) & sw_mask) >> SELECTOR_SW_BASE;
-#else                                                       // sw pulls gpio pins high, so non-inverted result
+#else                                                       // sw pulls gpio pins high, so non-inverted result      (스위치가 HIGH 로 당기므로 반전 없음)
     return (gpio_get_all() & sw_mask) >> SELECTOR_SW_BASE;
 #endif // SW_COMM_LOW
 }
 
 int main()
 {
-    volatile uint32_t sample;                               // temp store for sample read from Ultranet stream
-    const uint64_t repeat_us = STREAM_LED_RESET;            // Repeat time period for alarm to clear Ultranet stream LED
-    uint selector;                                          // Selector switch state
- 
-    set_binary_info();                                      // info for querying by picotool
-    stdio_init_all();                                       // initialise SDK libraries and interfaces
+    volatile uint32_t sample;                               // temp store for sample read from Ultranet stream       (Ultranet 에서 읽은 워드 임시 저장)
+    const uint64_t repeat_us = STREAM_LED_RESET;            // Repeat time period for alarm to clear Ultranet stream LED   (스트림 LED 리셋 알람 주기)
+    uint selector;                                          // Selector switch state                                 (셀렉터 스위치 상태)
+
+    set_binary_info();                                      // info for querying by picotool                         (picotool 조회용 정보)
+    stdio_init_all();                                       // initialise SDK libraries and interfaces               (SDK 표준 입출력 초기화)
+    // 시스템 클럭을 오버클럭한다. required=false 이므로 정확히 설정할 수 없으면 실패하며, 반환값은 확인하지 않는다
     set_sys_clock_khz(CLOCKSPEED,false);                    // set cpu clock frequency
 
 #ifdef DEBUG
-    sleep_ms(5000);                                         // allow time for USB serial to connect
+    sleep_ms(5000);                                         // allow time for USB serial to connect                  (USB 시리얼 연결 대기)
 #else
-    sleep_ms(500);                                          // allow time for clocks etc. to settle
+    sleep_ms(500);                                          // allow time for clocks etc. to settle                  (클럭 안정화 대기)
 #endif // DEBUG
 
 #ifdef WS2812
-    ws2812_pio_init(WS2812_PIO, WS2812_SM, WS2812_PIN);     // ws2812 output pio state machine
+    ws2812_pio_init(WS2812_PIO, WS2812_SM, WS2812_PIN);     // ws2812 output pio state machine                       (WS2812 출력 상태 머신)
 #endif // WS2812
 
-    ultranet_gpio_init();                                   // initialise required GPIO pins
+    ultranet_gpio_init();                                   // initialise required GPIO pins                         (필요한 GPIO 초기화)
 
-    add_alarm_in_us(repeat_us, alarm_callback, (void*)&repeat_us, false);  // start timer for stream LED blanking
+    // repeat_us 는 main() 의 지역 변수지만 main() 은 끝나지 않으므로 포인터가 계속 유효하다
+    add_alarm_in_us(repeat_us, alarm_callback, (void*)&repeat_us, false);  // start timer for stream LED blanking   (스트림 LED 소등 타이머 시작)
 
-    selector = get_selector();                              // read selector switch once at boot time
+    selector = get_selector();                              // read selector switch once at boot time                (부팅 시 한 번만 스위치 읽기)
 #ifdef DEBUG
     printf("Selector = %d\n", selector);
 #endif // DEBUG
 
+    // 스위치 최상위 비트(bit2)로 Ultranet 입력 스트림(핀)을 선택한다
     if(selector & 0b100)                                    // Most significant switch bit selects Ultranet input stream pin
-        ultranet_pio_init(UNET_PIO, UNET_SM, UNETH_PIN);    // initialise and start ultranet state machine
+        ultranet_pio_init(UNET_PIO, UNET_SM, UNETH_PIN);    // initialise and start ultranet state machine   (상위 스트림 9-16)
     else
-        ultranet_pio_init(UNET_PIO, UNET_SM, UNETL_PIN);    // initialise and start ultranet state machine
+        ultranet_pio_init(UNET_PIO, UNET_SM, UNETL_PIN);    // initialise and start ultranet state machine   (하위 스트림 1-8)
 
-    multicore_launch_core1(core1_entry);                    // start core 1
+    multicore_launch_core1(core1_entry);                    // start core 1                                  (코어1 시작)
 
-    sleep_ms(100);                                          // wait for core1 to start
+    sleep_ms(100);                                          // wait for core1 to start                       (코어1 시작 대기)
 #ifdef DEBUG
+    // 디버그 모드: USB 시리얼로 받은 문자에 따라 LED 색을 바꾸는 테스트 루프 (여기서 빠져나오지 않으므로 디코딩은 하지 않음)
     sleep_ms(5000);
     puts("FINISHED setting everything up\n");
 #ifdef WS2812
@@ -232,25 +279,32 @@ int main()
     }
 #endif // DEBUG
 
-    // sync with ultranet frames initially, so we don't turn LED on at start 
-    for(int count=0; count<200; count++)                    // discard the first 200 Ultranet frames after startup
-        sample = pio_sm_get_blocking(UNET_PIO, UNET_SM);    // get frame word from Ultranet FIFO
+    // sync with ultranet frames initially, so we don't turn LED on at start
+    // 시작 직후에는 Ultranet 프레임과 먼저 동기를 맞춰, 부팅 시 오류 LED 가 켜지지 않도록 한다
+    for(int count=0; count<200; count++)                    // discard the first 200 Ultranet frames after startup   (시작 후 처음 200 워드는 버림)
+        sample = pio_sm_get_blocking(UNET_PIO, UNET_SM);    // get frame word from Ultranet FIFO                     (FIFO 에서 워드 읽기)
 
     // now sync to start frame (starting with last sample read from FIFO)
+    // 이제 프레임 시작 워드를 찾는다 (마지막으로 읽은 워드부터 검사).
+    // 하위 6비트가 0x0B 또는 0x0F 이면 프레임 첫 번째 서브프레임(시작 동기 패턴)이다.
     while((sample & 0x3F) != 0x0000000B && (sample & 0x3F) != 0x0000000F)
     {
-        sample = pio_sm_get_blocking(UNET_PIO, UNET_SM);    // get next sample from Ultranet FIFO
-    }                                                       // "sample" now contains start frame
+        sample = pio_sm_get_blocking(UNET_PIO, UNET_SM);    // get next sample from Ultranet FIFO                    (다음 워드 읽기)
+    }                                                       // "sample" now contains start frame                     (이제 sample 은 프레임 시작 워드)
 
+    // 메인 디코딩 루프: 프레임마다 서브프레임 8개를 읽어 samples[] 에 저장한다
     while (true)
     {
         // synchronise with first subframe in Ultranet frame
+        // 프레임의 첫 번째 서브프레임인지 확인해 동기를 유지한다
         if((sample & 0x3F) == 0x0000000B || (sample & 0x3F) == 0x0000000F)
         {
             // if we get here, sample contains the first subframe in Ultranet frame
-            samples[0] = (sample << 4) & 0xFFFFFC00;        // move 22 bits of audio into MSBs
+            // 여기에 왔다면 sample 은 프레임의 첫 번째 서브프레임이다.
+            // (sample << 4) 로 오디오 데이터를 MSB 쪽으로 정렬하고, 하위 비트(동기/상태 비트)를 마스크한다.
+            samples[0] = (sample << 4) & 0xFFFFFC00;        // move 22 bits of audio into MSBs    (22비트 오디오를 MSB 로 이동)
 
-            sample = pio_sm_get_blocking(UNET_PIO,UNET_SM); // get next sample from Ultranet FIFO
+            sample = pio_sm_get_blocking(UNET_PIO,UNET_SM); // get next sample from Ultranet FIFO (다음 서브프레임 읽기)
             samples[1] = (sample << 4) & 0xFFFFFC00;        // move 22 bits of audio into MSBs
 
             sample = pio_sm_get_blocking(UNET_PIO,UNET_SM); // get next sample from Ultranet FIFO
@@ -271,12 +325,14 @@ int main()
             sample = pio_sm_get_blocking(UNET_PIO,UNET_SM); // get next sample from Ultranet FIFO
             samples[7] = (sample << 4) & 0xFFFFFC00;        // move 22 bits of audio into MSBs
 
+            // 정상 프레임 수신: 스트림 표시 색(파랑)을 켠다 (다른 색 비트는 유지)
             led_state = led_state | LED_STREAM_COLOUR;      // set selected LED on, preserving other colours
         }
         else    // if we get here, we looked for start frame in the right place, but didn't find it
         {
+            // 시작 프레임이 있어야 할 위치에서 찾지 못함: 오류 색(빨강)을 켠다 (다른 색 비트는 유지)
             led_state = led_state | LED_ERR_COLOUR;         // turn on RED, preserving other colours
         }
-        sample = pio_sm_get_blocking(UNET_PIO,UNET_SM);     // get next sample from Ultranet FIFO
+        sample = pio_sm_get_blocking(UNET_PIO,UNET_SM);     // get next sample from Ultranet FIFO    (다음 워드 읽기 - 다음 프레임의 시작이어야 함)
     }
 }
