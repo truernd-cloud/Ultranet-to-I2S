@@ -6,12 +6,9 @@
 *
 * Ultranet provides 16 separate audio channels (or 8 stereo pairs) via two twisted pairs in a
 * CAT5/CAT6 cable. Each pair carries 8 channels, and is termed a "stream" in this project.
-* This module decodes a single Ultranet stream, but can select between both available streams.
-*
-* The module can be used either as an all-channels decoder (8 simultaneous channels) or as a
-* specific decoder for selected channels. An optional binary selector switch sets the offset for
-* the order of output channels onto board pins, such that a single output pair (I2S or PWM) can
-* be selected to be any of the 8 available stereo pairs from the two Ultranet input streams.
+* This module decodes both Ultranet streams at the same time (16 channels), mixes all 16
+* channels down to a single stereo pair, and outputs the mix on one I2S output.
+* The level and pan of each channel in the mix are set by the mix table in "core1.c".
 *
 * [한국어]
 * Ultranet 프로젝트 공용 헤더 파일.
@@ -19,19 +16,14 @@
 *
 * Ultranet 은 CAT5/CAT6 케이블 안의 트위스트 페어 두 쌍으로 16개의 독립 오디오 채널
 * (스테레오 8쌍)을 전송한다. 한 쌍이 8채널을 실어 나르며, 이 프로젝트에서는 이를
-* "스트림(stream)" 이라고 부른다. 이 모듈은 한 번에 스트림 하나만 디코딩하지만,
-* 두 스트림 중 어느 것을 받을지 선택할 수 있다.
-*
-* 모듈은 전 채널 디코더(8채널 동시 출력)로 쓰거나, 특정 채널만 뽑아내는 디코더로 쓸 수 있다.
-* 선택 사항인 3비트 이진 셀렉터 스위치로 출력 채널이 보드 핀에 배치되는 순서(오프셋)를
-* 바꿀 수 있으므로, 출력 한 쌍(I2S 또는 PWM)만 사용하더라도 두 Ultranet 입력 스트림의
-* 스테레오 8쌍 중 원하는 쌍을 골라 낼 수 있다.
+* "스트림(stream)" 이라고 부른다. 이 모듈은 두 스트림(16채널)을 동시에 디코딩하고,
+* 16채널을 스테레오 2채널로 믹스해 I2S 출력 하나로 내보낸다.
+* 채널별 믹스 레벨과 팬은 "core1.c" 의 믹스 테이블에서 설정한다.
 */
 
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
-#include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "pico/multicore.h"
 #include "pico/binary_info.h"
@@ -42,8 +34,8 @@
 
 // strings for inclusion in binary info (for query by picotool)
 // picotool 로 조회할 수 있도록 바이너리에 삽입되는 설명/버전 문자열
-#define DESCRIPTION "Single Ultranet stream input (sw selected), 4xI2S stereo, 8xPWM mono"
-#define VERSION "1.2"
+#define DESCRIPTION "Dual Ultranet stream input (16ch), mixed to 1xI2S stereo"
+#define VERSION "2.0"
 
 // conditional compilation switches for hardware options
 // 하드웨어 옵션용 조건부 컴파일 스위치
@@ -61,30 +53,25 @@
 #define AUDIV 8                     // Audio divider for pio timing (7 for 172MHz, 8 for 196.5MHz)
                                     // (오디오 PIO 분주비: 196.5MHz / 8 ≒ 24.56MHz ≒ 512 x 48kHz, 즉 MCLK(256fs)의 2배)
 // Ultranet input and MCLK state machines use pio0
-// Ultranet 입력과 MCLK 상태 머신은 pio0 을 사용
-#define UNETL_PIN 0                 // ultranet low stream (1-8) input pin      (하위 스트림 1-8 입력 핀)
-#define UNETH_PIN 1                 // ultranet high stream (9-16) input pin    (상위 스트림 9-16 입력 핀)
-#define UNET_PIN UNETL_PIN          // ultranet default input pin               (기본 입력 핀)
+// Ultranet 입력 2개와 MCLK 상태 머신은 pio0 을 사용 (SM0, SM1 = Ultranet, SM2 = WS2812, SM3 = MCLK)
 #define UNET_PIO pio0               // PIO module to use for Ultranet input     (Ultranet 입력용 PIO)
-#define UNET_SM 0                   // state machine to use for Ultranet input  (Ultranet 입력용 상태 머신)
+#define UNETL_PIN 0                 // ultranet low stream (1-8) input pin      (하위 스트림 1-8 입력 핀)
+#define UNETL_SM 0                  // state machine for low stream             (하위 스트림용 상태 머신)
+#define UNETH_PIN 1                 // ultranet high stream (9-16) input pin    (상위 스트림 9-16 입력 핀)
+#define UNETH_SM 1                  // state machine for high stream            (상위 스트림용 상태 머신)
+#define UNET_STREAMS 2              // number of streams decoded                (디코딩하는 스트림 수)
+#define UNET_CHANNELS (8*UNET_STREAMS)  // total channels decoded               (디코딩하는 전체 채널 수)
 #ifdef MCLK                         // if we want an I2S MCLK clock
     // 참고: 공식 Raspberry Pi Pico 보드에서는 GP24 가 VBUS 감지용으로 내부 연결되어 있어 핀 헤더로 나오지 않는다
     #define MCLK_PIN 24             // I2S Master Clock Pin (if used)           (I2S 마스터 클럭 핀)
     #define MCLK_PIO pio0           // state machine for I2S master clock      (MCLK 용 PIO)
-    #define MCLK_SM 1               // state machine for I2S master clock      (MCLK 용 상태 머신)
+    #define MCLK_SM 3               // state machine for I2S master clock      (MCLK 용 상태 머신)
 #endif // MCLK
-// I2S outputs use second pio (pio1), four I2S outputs, 3 pins each
-// I2S 출력은 두 번째 PIO(pio1)의 상태 머신 4개를 모두 사용. 출력 4개, 각 3핀(DATA, BCLK, LRCLK)
-#define I2S_PIO pio1                // PIO 1 is dedicated to I2S outputs (all 4 SMs)
-#define I2S1_PINS 2                 // base for I2S output pins (3 pins starting point)   (I2S1: GP2~4)
-#define I2S2_PINS 5                 // base for I2S output pins (3 pins starting point)   (I2S2: GP5~7)
-#define I2S3_PINS 8                 // base for I2S output pins (3 pins starting point)   (I2S3: GP8~10)
-#define I2S4_PINS 17                // base for I2S output pins (3 pins starting point)   (I2S4: GP17~19)
-// Selector binary switch (3 pole)
-// 3비트 이진 셀렉터 스위치 (GP11~13). 스위치 공통 단자를 0V 또는 3.3V 중 어디에 연결했는지 하나만 정의한다.
-#define SELECTOR_SW_BASE 11         // base pin (switch is 3-pin, base+2) switches to ground
-#define SW_COMM_LOW                 // switch common pin(s) are connected to 0v     (공통 단자 = 0V, 내부 풀업 사용)
-// #define SW_COMM_HIGH             // switch common pin(s) are connected to 3.3v   (공통 단자 = 3.3V, 내부 풀다운 사용)
+// Single I2S stereo output on pio1
+// I2S 스테레오 출력 1개 (pio1 SM0), 3핀(DATA, BCLK, LRCLK)
+#define I2S_PIO pio1                // PIO for I2S output                       (I2S 출력용 PIO)
+#define I2S_SM 0                    // state machine for I2S output             (I2S 출력용 상태 머신)
+#define I2S_PINS 2                  // base for I2S output pins (3 pins starting point)   (I2S: GP2~4)
 // ws2812 multicolour LED driving
 // WS2812 컬러 LED 구동 설정
 #ifdef WS2812
@@ -102,30 +89,21 @@
     #define YELLOW (GREEN|RED)
     #define BLACK 0                 // turn off all LEDs in module                 (모든 LED 끄기)
     #define LED_ERR_COLOUR RED      // set colour for LED frame error indiication  (프레임 오류 표시 색)
-    #define LED_STREAM_COLOUR BLUE  // set colour for LED stream indication        (스트림 수신 표시 색)
-    #define LED_STREAM_MASK 0xFFFF00FF  // Mask blue bits, for stream detect LED   (파란색 비트만 지우는 마스크)
+    #define LED_STREAML_COLOUR BLUE // set colour for low stream (1-8) indication  (하위 스트림 수신 표시 색)
+    #define LED_STREAMH_COLOUR GREEN // set colour for high stream (9-16) indication (상위 스트림 수신 표시 색)
+    // Mask stream colour bits, for stream detect LED  (스트림 표시 색 비트만 지우는 마스크)
+    #define LED_STREAM_MASK (~(LED_STREAML_COLOUR|LED_STREAMH_COLOUR))
     #define put_pixel(pixel) pio_sm_put(WS2812_PIO, WS2812_SM, (pixel))
 #endif // WS2812
 // #define PICO_LED 25                 // Uncomment to use normal LED on standard PICO boards
                                        // (일반 Pico 보드의 기본 LED(GP25)를 쓰려면 주석 해제)
 #define STREAM_LED_RESET 200000     // Period in us to reset stream indicator LED  (스트림 LED 를 리셋하는 주기, us)
-// for PWM analog audio outputs
-// PWM 아날로그 오디오 출력 핀 (각 PWM 슬라이스의 A = 왼쪽, B = 오른쪽). 출력에 RC 저역 통과 필터가 필요하다.
-// 참고: 공식 Pico 보드에서 GP29 는 VSYS 전압 측정용으로 내부 연결되어 있어 사용할 수 없다.
-#define PIN_PWM_1A 14               // A channel of PWM slice (left audio)
-#define PIN_PWM_1B 15               // B channel of PWM slice (right audio)
-#define PIN_PWM_2A 20               // A channel of PWM slice (left audio)
-#define PIN_PWM_2B 21               // B channel of PWM slice (right audio)
-#define PIN_PWM_3A 26               // A channel of PWM slice (left audio)
-#define PIN_PWM_3B 27               // B channel of PWM slice (right audio)
-#define PIN_PWM_4A 28               // A channel of PWM slice (left audio)
-#define PIN_PWM_4B 29               // B channel of PWM slice (right audio)
 
 // these need to be "volatile" otherwise the compiler optimises them out!
 // 두 코어(및 인터럽트)가 공유하는 변수이므로 반드시 volatile 이어야 컴파일러가 최적화로 없애지 않는다
-extern volatile uint32_t samples[8]; // array of samples read from Ultranet stream   (Ultranet 에서 읽은 8채널 샘플 버퍼)
+// samples[0..7] = 하위 스트림 채널 1-8, samples[8..15] = 상위 스트림 채널 9-16
+extern volatile uint32_t samples[UNET_CHANNELS]; // array of samples read from Ultranet streams   (Ultranet 에서 읽은 16채널 샘플 버퍼)
 extern volatile uint32_t led_state; // current value last sent to WS2812 LED         (WS2812 LED 에 마지막으로 보낸 값)
 
 extern void core1_entry(void);      // main process for core 1, defined in "core1.c"  (코어1 메인 함수)
 extern void set_core1_info(void);   // set binary info for pins used by core1         (코어1 사용 핀의 바이너리 정보)
-extern uint get_selector(void);     // return selector switch state in low 3 bits     (셀렉터 스위치 상태를 하위 3비트로 반환)

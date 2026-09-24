@@ -1,6 +1,6 @@
 ; receives Ultranet protocol - 8 channels encoded in AES/EBU like protocol
 ; each sample at 48khz sample rate.
-; assumes core clock frequency overclocked to 172MHz to better capture
+; assumes core clock frequency overclocked to 196.5MHz (or 172MHz) to better capture
 ; line state changes.
 ; line bit rate is 12.288MHz (same as 192khz stereo AES/EBU encodinig)
 ; biphase encoding means line clock rate is 12.288 x 2 = 24.576 MHz
@@ -93,15 +93,15 @@ sync1xxx:                  ; sync1xxx must be sync1000     (sync1xxx 는 반드�
 ; Master Clock output
 ; Outputs I2S MCLK on specified pin
 ; Frequency is 256xfs - ideal would be 256 x 48MHz = 12.288MHz
-; Actual frequency = 172MHz (sys clock) / 7 / 2 = 12.286MHz
-; only one MCLK clock generator for all 4 I2S state machines
-; as they should all be in sync. with the (much faster) master clock
+; Actual frequency = 196.5MHz (sys clock) / 8 / 2 = 12.281MHz (or 172MHz / 7 / 2 = 12.286MHz)
+; MCLK uses the same clock divider as the I2S state machine,
+; so it stays in sync. with the I2S bit clock
 ;
 ; [한국어] 마스터 클럭 출력
 ; 지정한 핀으로 I2S MCLK 를 출력한다.
 ; 주파수는 256 x fs, 이상적으로는 256 x 48kHz = 12.288MHz.
 ; 실제 주파수 = 196.5MHz / 8 / 2 ≒ 12.28MHz (172MHz 설정 시 172MHz / 7 / 2 ≒ 12.286MHz).
-; 4개의 I2S 상태 머신이 모두 같은 분주비를 쓰므로 MCLK 생성기는 하나만 둔다.
+; I2S 상태 머신과 같은 분주비를 쓰므로 MCLK 와 I2S 비트 클럭은 항상 동기된다.
 
 .program mclk
 .wrap_target
@@ -114,7 +114,6 @@ sync1xxx:                  ; sync1xxx must be sync1000     (sync1xxx 는 반드�
 ; PIO Clock freq: 24.57MHz (172MHz / 7)
 ; Or PIO Clock freq: 24.56MHz (196.5MHz / 8)
 ; Bit depth: 32bit
-; this same code is shared between all 4 state machines in the PIO
 ;
 ; The program generates 3 outputs on 3 separate pins (per state machine)
 ; One pin is driven by the "out" instruction (the SD line), while the other
@@ -125,7 +124,6 @@ sync1xxx:                  ; sync1xxx must be sync1000     (sync1xxx 는 반드�
 ; fs: 48kHz, 비트 깊이: 32비트 (슬롯 2개 x 32비트 = 64 BCLK / 프레임)
 ; PIO 클럭: 24.56MHz (196.5MHz / 8) 또는 24.57MHz (172MHz / 7)
 ; 비트 하나에 PIO 8사이클 → BCLK ≒ 3.07MHz = 64 x 48kHz
-; 같은 코드를 PIO 안의 상태 머신 4개가 공유한다.
 ;
 ; 상태 머신마다 핀 3개를 출력한다.
 ; "out" 명령은 데이터(SD) 핀을 구동하고, 나머지 두 신호(BCLK, LRCLK)는 사이드셋으로 구동한다.

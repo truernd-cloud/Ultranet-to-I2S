@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name
 
-add_executable(Ultranet Ultranet.c core1.c ultranet.h)
+add_executable(Ultranet ultranet.c core1.c ultranet.h)
 
 pico_set_program_name(Ultranet "Ultranet")
 # program version string is now defined in main source file
@@ -60,7 +60,6 @@ target_include_directories(Ultranet PRIVATE
 # Add any user requested libraries
 target_link_libraries(Ultranet 
         hardware_pio
-        hardware_pwm
         hardware_clocks
         pico_multicore
         )
