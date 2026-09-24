@@ -8,7 +8,8 @@
 * CAT5/CAT6 cable. Each pair carries 8 channels, and is termed a "stream" in this project.
 * This module decodes both Ultranet streams at the same time (16 channels), mixes all 16
 * channels down to a single stereo pair, and outputs the mix on one I2S output.
-* The level and pan of each channel in the mix are set by the mix table in "core1.c".
+* The level and pan of each channel in the mix are set by the mix table in "core1.c",
+* and can be changed at run time by MIDI Control Change messages (UART MIDI input).
 *
 * [한국어]
 * Ultranet 프로젝트 공용 헤더 파일.
@@ -18,13 +19,15 @@
 * (스테레오 8쌍)을 전송한다. 한 쌍이 8채널을 실어 나르며, 이 프로젝트에서는 이를
 * "스트림(stream)" 이라고 부른다. 이 모듈은 두 스트림(16채널)을 동시에 디코딩하고,
 * 16채널을 스테레오 2채널로 믹스해 I2S 출력 하나로 내보낸다.
-* 채널별 믹스 레벨과 팬은 "core1.c" 의 믹스 테이블에서 설정한다.
+* 채널별 믹스 레벨과 팬은 "core1.c" 의 믹스 테이블에서 설정하며,
+* 동작 중에는 MIDI 컨트롤 체인지 메시지(UART MIDI 입력)로 바꿀 수 있다.
 */
 
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
+#include "hardware/uart.h"
 #include "pico/multicore.h"
 #include "pico/binary_info.h"
 
@@ -34,8 +37,8 @@
 
 // strings for inclusion in binary info (for query by picotool)
 // picotool 로 조회할 수 있도록 바이너리에 삽입되는 설명/버전 문자열
-#define DESCRIPTION "Dual Ultranet stream input (16ch), mixed to 1xI2S stereo"
-#define VERSION "2.0"
+#define DESCRIPTION "Dual Ultranet stream input (16ch), mixed to 1xI2S stereo, MIDI mix control"
+#define VERSION "2.1"
 
 // conditional compilation switches for hardware options
 // 하드웨어 옵션용 조건부 컴파일 스위치
@@ -45,6 +48,8 @@
                                     // (보드에 WS2812 RGB LED 가 있음)
 #define MCLK                        // Enable MCLK clock for I2S devices
                                     // (I2S 장치용 마스터 클럭 MCLK 출력 사용)
+#define MIDI                        // Enable MIDI input (UART) for mix control
+                                    // (믹스 조작용 MIDI 입력(UART) 사용)
 
 // 시스템 클럭(kHz). PIO 가 Ultranet 바이페이즈 클럭(24.576MHz)의 7배 또는 8배로 샘플링하도록 설정한다.
 // CLOCKSPEED 와 AUDIV, 그리고 ultranet.pio 의 "cy" 값은 반드시 함께 맞춰서 바꿔야 한다.
@@ -72,6 +77,13 @@
 #define I2S_PIO pio1                // PIO for I2S output                       (I2S 출력용 PIO)
 #define I2S_SM 0                    // state machine for I2S output             (I2S 출력용 상태 머신)
 #define I2S_PINS 2                  // base for I2S output pins (3 pins starting point)   (I2S: GP2~4)
+// MIDI input: UART receive only, 31250 baud. Needs an opto-isolated MIDI IN circuit (e.g. 6N138 / H11L1)
+// MIDI 입력: UART 수신 전용, 31250 baud. 광절연 MIDI IN 회로(예: 6N138 / H11L1)가 필요하다
+#ifdef MIDI
+    #define MIDI_UART uart1         // UART used for MIDI input                   (MIDI 입력용 UART)
+    #define MIDI_RX_PIN 5           // UART1 RX pin                               (UART1 RX 핀: GP5)
+    #define MIDI_BAUD 31250         // MIDI baud rate                             (MIDI 통신 속도)
+#endif // MIDI
 // ws2812 multicolour LED driving
 // WS2812 컬러 LED 구동 설정
 #ifdef WS2812

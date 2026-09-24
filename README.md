@@ -3,7 +3,7 @@ Use RPi Pico to decode Behringer Ultranet and output to multiple I2S streams
 
 [한국어 README](README.ko.md) · [코드 리뷰 (한국어)](CODE_REVIEW.ko.md)
 
-> **Version 2.0 (this branch):** decodes both Ultranet streams (16 channels) at once and mixes them to a single stereo I2S output (GP2-4). PWM outputs and the selector switch are removed. The per-channel level and pan are set in `mix_table[]` in `core1.c`. See [README.ko.md](README.ko.md) for details.
+> **Version 2.1 (this branch):** decodes both Ultranet streams (16 channels) at once and mixes them to a single stereo I2S output (GP2-4). PWM outputs and the selector switch are removed. The per-channel level and pan are set in `mix_table[]` in `core1.c`, and can be changed at run time over UART MIDI input on GP5 (MIDI channel = mixer channel, CC7 = volume, CC10 = pan). See [README.ko.md](README.ko.md) for details.
 
 I've wanted a simple (and cheap!) way to decode analog audio from Behringer Ultranet for years, and I've finally got around to doing it! The Raspberry Pi Pico is the ideal device to use, as it has two secret weapons: the PIO modules, and dual processors. I use the PIO modules to decode an incoming Ultranet stream into 8 audio channels, then to encode pairs of channels into I2S output streams (to send to low-cost I2S decoder boards as found on popular auction sites). 
 
